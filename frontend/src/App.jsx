@@ -13,6 +13,8 @@ const bubbleVariants = {
   }
 };
 
+const API_BASE = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:5000' : '');
+
 function App() {
   const [formData, setFormData] = useState({ eventType: 'Wedding', budget: 100000, guests: 100, vibe: 'Royal' });
   const [plan, setPlan] = useState(null);
@@ -26,7 +28,7 @@ function App() {
     setPlan(null);
     
     try {
-      const res = await fetch('http://localhost:5000/api/generate-plan', {
+      const res = await fetch(`${API_BASE}/api/generate-plan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
@@ -226,4 +228,6 @@ function App() {
 }
 
 export default App;
+
+
 

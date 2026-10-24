@@ -1,19 +1,26 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Health & Status check endpoint for browser testing
-app.get('/', (req, res) => {
+// Path to built frontend assets
+const distPath = path.join(__dirname, '../frontend/dist');
+if (fs.existsSync(distPath)) {
+    app.use(express.static(distPath));
+}
+
+// Health & Status check endpoint
+app.get('/api/health', (req, res) => {
     res.json({
         status: "online",
         message: "🎉 Utsav AI Backend Server is live and running!",
         geminiApiStatus: process.env.GEMINI_API_KEY ? "Connected" : "Missing Key",
         endpoints: {
-            test: "GET /",
             generatePlan: "POST /api/generate-plan"
         }
     });
@@ -70,6 +77,26 @@ app.post('/api/generate-plan', async (req, res) => {
     } catch (error) {
         console.error("[API Error] Backend Error:", error.message);
         res.status(500).json({ error: error.message || "Failed to generate plan. Please try again." });
+    }
+});
+
+// For any non-API route, serve frontend index.html if built, else show status JSON
+app.get('*', (req, res) => {
+    if (req.path.startsWith('/api')) {
+        return res.status(404).json({ error: 'Endpoint not found' });
+    }
+    const indexPath = path.join(distPath, 'index.html');
+    if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+    } else {
+        res.json({
+            status: "online",
+            message: "🎉 Utsav AI Server is live! Run `npm run build` to serve frontend here.",
+            endpoints: {
+                health: "GET /api/health",
+                generatePlan: "POST /api/generate-plan"
+            }
+        });
     }
 });
 

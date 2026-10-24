@@ -1,6 +1,6 @@
 /**
  * Utsav AI - GenAI Event Planner Backend
- * Production-ready Express API with Security, Caching, and Validation.
+ * Production-ready Express API with Enterprise Security, Caching, and Validation.
  */
 
 const express = require('express');
@@ -8,6 +8,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
+const hpp = require('hpp');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
@@ -18,31 +19,45 @@ const app = express();
 // 1. SECURITY & PERFORMANCE MIDDLEWARE
 // ==========================================
 
-// HTTP Security Headers via Helmet
+// HTTP Security Headers with Strict Content-Security-Policy
 app.use(helmet({
-    contentSecurityPolicy: false, // Allows flexible SPA asset loading
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'", "'unsafe-inline'"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+            fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
+            connectSrc: ["'self'", "https://generativelanguage.googleapis.com", "https://*.onrender.com", "https://*.vercel.app"],
+            imgSrc: ["'self'", "data:", "https:"],
+            objectSrc: ["'none'"],
+            baseUri: ["'self'"]
+        }
+    },
     crossOriginEmbedderPolicy: false
 }));
 
 // Gzip / Deflate Compression for high efficiency
 app.use(compression());
 
-// CORS Configuration
-const allowedOrigins = process.env.ALLOWED_ORIGINS 
-    ? process.env.ALLOWED_ORIGINS.split(',') 
-    : ['http://localhost:5173', 'http://localhost:5000', 'http://127.0.0.1:5173'];
+// HTTP Parameter Pollution Protection
+app.use(hpp());
+
+// Strict Origin Validation (Prevent Insecure Wildcards)
+const allowedOriginRegex = /^(https?:\/\/localhost(:\d+)?|https?:\/\/127\.0\.0\.1(:\d+)?|https:\/\/.*\.onrender\.com|https:\/\/.*\.vercel\.app)$/;
 
 app.use(cors({
     origin: (origin, callback) => {
         // Allow mobile apps, curl, postman, and same-origin requests (origin === undefined)
-        if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.onrender.com') || origin.endsWith('.vercel.app')) {
+        if (!origin || allowedOriginRegex.test(origin)) {
             callback(null, true);
         } else {
-            callback(null, true); // Fallback to permissive for hackathon demo
+            callback(new Error('Blocked by CORS policy: Origin not allowed.'));
         }
     },
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+    maxAge: 86400
 }));
 
 // Body Parser with strict payload size limit (Anti-DoS)
@@ -66,8 +81,8 @@ app.use('/api/', apiLimiter);
 const planCache = new Map();
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
-function getCacheKey(eventType, budget, guests, vibe) {
-    return `${String(eventType).trim().toLowerCase()}_${budget}_${guests}_${String(vibe).trim().toLowerCase()}`;
+function getCacheKey(eventType, budget, guests, vibe, currency = 'INR') {
+    return `${String(eventType).trim().toLowerCase()}_${budget}_${guests}_${String(vibe).trim().toLowerCase()}_${currency.toLowerCase()}`;
 }
 
 // Clean up expired cache entries periodically
@@ -93,7 +108,7 @@ function sanitizeInput(str) {
 }
 
 function validateEventPayload(req, res, next) {
-    let { eventType, budget, guests, vibe } = req.body;
+    let { eventType, budget, guests, vibe, currency = 'INR' } = req.body;
 
     // Check presence
     if (!eventType || budget === undefined || guests === undefined || !vibe) {
@@ -106,9 +121,9 @@ function validateEventPayload(req, res, next) {
     const numericBudget = Number(budget);
     const numericGuests = parseInt(guests, 10);
 
-    if (isNaN(numericBudget) || numericBudget < 500 || numericBudget > 100000000) {
+    if (isNaN(numericBudget) || numericBudget < 100 || numericBudget > 100000000) {
         return res.status(400).json({ 
-            error: "Validation failed: 'budget' must be a valid number between ₹500 and ₹10,00,00,000." 
+            error: "Validation failed: 'budget' must be a valid number between 100 and 10,00,00,000." 
         });
     }
 
@@ -118,31 +133,47 @@ function validateEventPayload(req, res, next) {
         });
     }
 
-    // Sanitize string inputs
-    const cleanEventType = sanitizeInput(eventType);
-    const cleanVibe = sanitizeInput(vibe);
-
-    // Guard against prompt injection phrases
+    // Guard against prompt injection & XSS before sanitization
+    const rawCombined = `${eventType} ${vibe}`;
     const injectionPatterns = [
         /ignore previous instructions/i,
         /system prompt/i,
         /disregard/i,
         /as an ai assistant/i,
-        /repeat back/i
+        /repeat back/i,
+        /<script/i,
+        /javascript:/i,
+        /SELECT \* FROM/i
     ];
 
-    if (injectionPatterns.some(p => p.test(cleanEventType) || p.test(cleanVibe))) {
+    if (injectionPatterns.some(p => p.test(rawCombined))) {
         return res.status(400).json({
             error: "Invalid input content detected. Please use genuine event descriptions."
         });
     }
+
+    // Sanitize string inputs
+    const cleanEventType = sanitizeInput(eventType);
+    const cleanVibe = sanitizeInput(vibe);
+    const cleanCurrency = ['INR', 'USD', 'EUR', 'GBP'].includes(String(currency).toUpperCase()) 
+        ? String(currency).toUpperCase() 
+        : 'INR';
+
+    // Calculate budget health advisory
+    const perGuest = Math.round(numericBudget / numericGuests);
+    let budgetAdvisory = "Balanced";
+    if (perGuest < 300) budgetAdvisory = "Budget-Conscious (DIY Focus)";
+    else if (perGuest > 3000) budgetAdvisory = "Premium / Luxury Tier";
 
     // Attach sanitized values to request
     req.sanitized = {
         eventType: cleanEventType,
         budget: numericBudget,
         guests: numericGuests,
-        vibe: cleanVibe
+        vibe: cleanVibe,
+        currency: cleanCurrency,
+        budgetAdvisory,
+        perGuest
     };
 
     next();
@@ -159,14 +190,15 @@ app.get('/api/health', (req, res) => {
         uptimeSeconds: Math.floor(process.uptime()),
         timestamp: new Date().toISOString(),
         geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
-        cacheSize: planCache.size
+        cacheEntries: planCache.size,
+        securityHeaders: "Helmet + CSP + HPP Enabled"
     });
 });
 
 // Event Plan Generation Endpoint
 app.post('/api/generate-plan', validateEventPayload, async (req, res) => {
-    const { eventType, budget, guests, vibe } = req.sanitized;
-    const cacheKey = getCacheKey(eventType, budget, guests, vibe);
+    const { eventType, budget, guests, vibe, currency, budgetAdvisory, perGuest } = req.sanitized;
+    const cacheKey = getCacheKey(eventType, budget, guests, vibe, currency);
 
     // 1. Check in-memory cache first (Ultra-low latency <5ms)
     const cached = planCache.get(cacheKey);
@@ -183,17 +215,18 @@ app.post('/api/generate-plan', validateEventPayload, async (req, res) => {
     }
 
     try {
-        console.log(`[API] Generating plan for: ${eventType} | Budget: ₹${budget} | Guests: ${guests} | Vibe: ${vibe}`);
+        console.log(`[API] Generating plan: ${eventType} | Budget: ${currency} ${budget} | Guests: ${guests} | Vibe: ${vibe}`);
 
         const prompt = `You are an elite, certified event planning expert. 
 Create an exhaustive, highly realistic event plan for:
 Event: ${eventType}
-Target Budget: ₹${budget}
+Target Budget: ${currency} ${budget}
 Expected Guests: ${guests}
 Theme/Vibe: ${vibe}
+Budget Tier: ${budgetAdvisory} (~${currency} ${perGuest}/guest)
 
 Strict Requirements:
-1. Budget breakdown must have realistic itemized allocations totaling approximately ₹${budget}.
+1. Budget breakdown must have realistic itemized allocations totaling approximately ${currency} ${budget}.
 2. Timeline must provide chronological steps with realistic daysBefore count.
 3. Vendors must be relevant industry service providers.
 4. Personalized ideas must be creative, actionable, and match the specified theme.
@@ -250,6 +283,14 @@ Return ONLY a valid JSON object with this exact structure:
         if (!Array.isArray(plan.budgetBreakdown) || !Array.isArray(plan.timeline) || !Array.isArray(plan.vendors) || !Array.isArray(plan.personalizedIdeas)) {
             throw new Error("Generated plan structure is incomplete.");
         }
+
+        // Attach metadata
+        plan.metadata = {
+            currency,
+            budgetAdvisory,
+            perGuestAverage: perGuest,
+            generatedAt: new Date().toISOString()
+        };
 
         // Save into cache
         planCache.set(cacheKey, { timestamp: Date.now(), data: plan });
